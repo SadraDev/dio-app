@@ -34,8 +34,16 @@ class ApiClient {
             final refreshed = await _refreshToken();
 
             if (refreshed) {
-              final retryResponse = await dio.fetch(e.requestOptions);
-              return handler.resolve(retryResponse);
+              // THE FIX: Inject the newly refreshed token into the retry request headers!
+              e.requestOptions.headers["Authorization"] = "Bearer ${AuthSession.accessToken}";
+
+              try {
+                final retryResponse = await dio.fetch(e.requestOptions);
+                return handler.resolve(retryResponse);
+              } catch (retryError) {
+                // If the retry itself fails, pass the original error forward
+                return handler.next(e);
+              }
             }
           }
 

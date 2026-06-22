@@ -5,6 +5,7 @@ class AccountData {
   final double freeMargin;
   final double marginLevel;
   final String currency;
+  final int leverage;
 
   AccountData({
     required this.balance,
@@ -13,6 +14,7 @@ class AccountData {
     required this.freeMargin,
     required this.marginLevel,
     required this.currency,
+    required this.leverage,
   });
 
   factory AccountData.fromJson(Map<String, dynamic> json) {
@@ -23,6 +25,7 @@ class AccountData {
       freeMargin: (json['free_margin'] as num).toDouble(),
       marginLevel: (json['margin_level'] as num).toDouble(),
       currency: json['currency'] ?? 'USD',
+      leverage: json['leverage'] ?? 0
     );
   }
 }

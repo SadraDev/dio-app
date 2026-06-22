@@ -1,26 +1,21 @@
 import os
-from channels.routing import ProtocolTypeRouter, URLRouter
 from django.core.asgi import get_asgi_application
-
-import marketdata.routing
+from channels.routing import ProtocolTypeRouter, URLRouter
 from channels.auth import AuthMiddlewareStack
-
-import asyncio
-from marketdata.tasks import run_tick_loop
 
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "core.settings")
 
+# Initialize Django ASGI application early to ensure the AppRegistry
+# is populated before importing code that may import ORM models.
 django_asgi_app = get_asgi_application()
+
+import strategies.routing
 
 application = ProtocolTypeRouter({
     "http": django_asgi_app,
-
     "websocket": AuthMiddlewareStack(
         URLRouter(
-            marketdata.routing.websocket_urlpatterns
+            strategies.routing.websocket_urlpatterns
         )
     ),
-})
-
-
-asyncio.create_task(run_tick_loop())
+})  

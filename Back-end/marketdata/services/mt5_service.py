@@ -13,6 +13,7 @@ TIMEFRAME_MAP = {
     "MN1": mt5.TIMEFRAME_MN1,
 }
 
+
 class MT5Service:
     def __init__(self):
         connected = mt5.initialize()
@@ -20,63 +21,90 @@ class MT5Service:
             raise Exception("MT5 initialization failed")
 
     def get_account_info(self):
-            account = mt5.account_info()
-            if account:
-                return {
-                    "balance": account.balance,
-                    "equity": account.equity,
-                    "margin": account.margin,
-                    "free_margin": account.margin_free,
-                    "margin_level": account.margin_level,
-                    "currency": account.currency
-                }
-            return None
+        account = mt5.account_info()
+        if account:
+            return {
+                "balance": account.balance,
+                "equity": account.equity,
+                "margin": account.margin,
+                "free_margin": account.margin_free,
+                "margin_level": account.margin_level,
+                "currency": account.currency,
+                "leverage": account.leverage,
+            }
+        return None
 
-    def get_trading_data(self, symbol):
-        # 1. Fetch Open Positions (No dates needed)
-        positions_raw = mt5.positions_get(symbol=symbol)
-        positions = [p._asdict() | {'type_str': 'buy' if p.type == mt5.POSITION_TYPE_BUY else 'sell'} 
-                    for p in (positions_raw or [])]
+    def get_trading_data(self, symbol=None):
+        # 1. Open Positions
+        # If symbol is provided, fetch for that symbol. Otherwise, fetch all.
+        if symbol:
+            positions_raw = mt5.positions_get(symbol=symbol)
+        else:
+            positions_raw = mt5.positions_get()
+            
+        positions = [
+            p._asdict() | {"type_str": "buy" if p.type == mt5.POSITION_TYPE_BUY else "sell"}
+            for p in (positions_raw or [])
+        ]
 
-        # 2. Fetch Pending Orders (No dates needed)
-        orders_raw = mt5.orders_get(symbol=symbol)
+        # 2. Pending Orders
+        if symbol:
+            orders_raw = mt5.orders_get(symbol=symbol)
+        else:
+            orders_raw = mt5.orders_get()
+            
         orders = []
         if orders_raw is not None:
             for o in orders_raw:
                 o_dict = o._asdict()
                 type_map = {
-                    mt5.ORDER_TYPE_BUY_LIMIT: 'buy_limit',
-                    mt5.ORDER_TYPE_SELL_LIMIT: 'sell_limit',
-                    mt5.ORDER_TYPE_BUY_STOP: 'buy_stop',
-                    mt5.ORDER_TYPE_SELL_STOP: 'sell_stop',
+                    mt5.ORDER_TYPE_BUY_LIMIT: "buy_limit",
+                    mt5.ORDER_TYPE_SELL_LIMIT: "sell_limit",
+                    mt5.ORDER_TYPE_BUY_STOP: "buy_stop",
+                    mt5.ORDER_TYPE_SELL_STOP: "sell_stop",
                 }
                 if o.type in type_map:
-                    o_dict['type_str'] = type_map[o.type]
+                    o_dict["type_str"] = type_map[o.type]
                     orders.append(o_dict)
 
-        # 3. Fetch Deals (Internal 30-day range)
+        # 3. Deals (internal 365-day range)
         end_date = datetime.now() + timedelta(days=1)
         start_date = end_date - timedelta(days=365)
-        
+
+        # history_deals_get automatically gets all deals in the time range
         deals_raw = mt5.history_deals_get(start_date, end_date)
         deals = []
         if deals_raw is not None:
             for d in deals_raw:
-                # Filter by symbol manually to avoid API group issues
-                if d.symbol == symbol:
+                # If symbol is None, it ignores the symbol check and just checks price > 0
+                if (not symbol or d.symbol == symbol) and d.price > 0:
                     d_dict = d._asdict()
-                    d_dict['type_str'] = 'buy' if d.type == mt5.DEAL_TYPE_BUY else 'sell'
-                    d_dict['entry_str'] = 'in' if d.entry == mt5.DEAL_ENTRY_IN else ('out' if d.entry == mt5.DEAL_ENTRY_OUT else 'inout')
+                    d_dict["type_str"] = "buy" if d.type == mt5.DEAL_TYPE_BUY else "sell"
+                    d_dict["entry_str"] = (
+                        "in"
+                        if d.entry == mt5.DEAL_ENTRY_IN
+                        else ("out" if d.entry == mt5.DEAL_ENTRY_OUT else "inout")
+                    )
                     deals.append(d_dict)
 
-        return {
-            "positions": positions,
-            "orders": orders,
-            "deals": deals
-        }
+        return {"positions": positions, "orders": orders, "deals": deals}
+
+    # ──────────────────────────────────────────────────────────────────
+    # internal: send a request, retrying IOC then FOK filling modes
+    # ──────────────────────────────────────────────────────────────────
+    def _send_with_filling(self, request, error_label="Order"):
+        filling_modes = [mt5.ORDER_FILLING_IOC, mt5.ORDER_FILLING_FOK]
+        last_result = None
+        for filling_mode in filling_modes:
+            request["type_filling"] = filling_mode
+            last_result = mt5.order_send(request)
+            if last_result is not None and last_result.retcode == mt5.TRADE_RETCODE_DONE:
+                return last_result
+        if last_result is None:
+            raise Exception(f"{error_label} failed: internal MT5 error or bad request.")
+        raise Exception(f"{error_label} failed: {last_result.comment} (Code: {last_result.retcode})")
 
     def order_send(self, symbol, volume, side, price=None, sl=None, tp=None, magic=123456):
-        # 1. Ensure SL, TP, and Volume are properly typed
         sl = float(sl or 0.0)
         tp = float(tp or 0.0)
         volume = float(volume)
@@ -91,12 +119,10 @@ class MT5Service:
 
         side_lower = side.lower()
 
-        # 2. Determine Action, Order Type, and Price based on Market vs Pending Orders
         if "_limit" in side_lower:
             action_type = mt5.TRADE_ACTION_PENDING
             if price is None:
                 raise ValueError("Price must be specified for limit orders")
-            
             if side_lower == "buy_limit":
                 order_type = mt5.ORDER_TYPE_BUY_LIMIT
             elif side_lower == "sell_limit":
@@ -108,17 +134,15 @@ class MT5Service:
             tick = mt5.symbol_info_tick(symbol)
             if tick is None:
                 raise Exception(f"Could not retrieve tick data for {symbol}")
-                
-            if side_lower == 'buy':
+            if side_lower == "buy":
                 order_type = mt5.ORDER_TYPE_BUY
                 price = tick.ask if price is None else price
-            elif side_lower == 'sell':
+            elif side_lower == "sell":
                 order_type = mt5.ORDER_TYPE_SELL
                 price = tick.bid if price is None else price
             else:
                 raise ValueError("Market side must be 'buy' or 'sell'")
 
-        # 3. Construct the base request template
         request = {
             "action": action_type,
             "symbol": symbol,
@@ -127,31 +151,89 @@ class MT5Service:
             "price": float(price),
             "sl": float(sl),
             "tp": float(tp),
-            "deviation": 20,  # Slippage tolerance
+            "deviation": 20,
             "magic": magic,
             "comment": "API Order",
             "type_time": mt5.ORDER_TIME_GTC,
         }
+        return self._send_with_filling(request, error_label="Order")
 
-        # 4. Execution filling retry guard (Try IOC, fallback to FOK if it fails)
-        filling_modes = [mt5.ORDER_FILLING_IOC, mt5.ORDER_FILLING_FOK]
-        last_result = None
+    # ──────────────────────────────────────────────────────────────────
+    # NEW: close an open position by ticket (market close, opposite side)
+    # ──────────────────────────────────────────────────────────────────
+    def close_position(self, ticket, volume=None, magic=123456):
+        positions = mt5.positions_get(ticket=int(ticket))
+        if not positions:
+            raise Exception(f"Position {ticket} not found")
+        pos = positions[0]
 
-        for filling_mode in filling_modes:
-            request["type_filling"] = filling_mode
-            last_result = mt5.order_send(request)
+        tick = mt5.symbol_info_tick(pos.symbol)
+        if tick is None:
+            raise Exception(f"Could not retrieve tick data for {pos.symbol}")
 
-            if last_result is not None and last_result.retcode == mt5.TRADE_RETCODE_DONE:
-                return last_result
-            
-            # Optional trace debug logging
-            print(f"Order failed with filling type {filling_mode}. Retrying with next mode if available...")
+        if pos.type == mt5.POSITION_TYPE_BUY:
+            order_type = mt5.ORDER_TYPE_SELL
+            price = tick.bid
+        else:
+            order_type = mt5.ORDER_TYPE_BUY
+            price = tick.ask
 
-        # 5. If it exits the loop, both filling attempts failed
-        if last_result is None:
-            raise Exception("Order execution failed: Internal MT5 error or request parameters were structured incorrectly.")
-        
-        raise Exception(f"Order failed: {last_result.comment} (Code: {last_result.retcode})")
+        close_volume = float(volume) if volume else float(pos.volume)
+
+        request = {
+            "action": mt5.TRADE_ACTION_DEAL,
+            "symbol": pos.symbol,
+            "position": int(ticket),
+            "volume": close_volume,
+            "type": order_type,
+            "price": float(price),
+            "deviation": 20,
+            "magic": magic,
+            "comment": "API Close",
+            "type_time": mt5.ORDER_TIME_GTC,
+        }
+        return self._send_with_filling(request, error_label="Close")
+
+    # ──────────────────────────────────────────────────────────────────
+    # NEW: modify SL / TP of an open position
+    # ──────────────────────────────────────────────────────────────────
+    def modify_position(self, ticket, sl=None, tp=None):
+        positions = mt5.positions_get(ticket=int(ticket))
+        if not positions:
+            raise Exception(f"Position {ticket} not found")
+        pos = positions[0]
+
+        new_sl = float(sl) if sl is not None else float(pos.sl)
+        new_tp = float(tp) if tp is not None else float(pos.tp)
+
+        request = {
+            "action": mt5.TRADE_ACTION_SLTP,
+            "symbol": pos.symbol,
+            "position": int(ticket),
+            "sl": new_sl,
+            "tp": new_tp,
+        }
+        result = mt5.order_send(request)
+        if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
+            comment = result.comment if result else "internal MT5 error"
+            code = result.retcode if result else "N/A"
+            raise Exception(f"Modify failed: {comment} (Code: {code})")
+        return result
+
+    # ──────────────────────────────────────────────────────────────────
+    # NEW: cancel a pending order by ticket
+    # ──────────────────────────────────────────────────────────────────
+    def cancel_order(self, ticket):
+        request = {
+            "action": mt5.TRADE_ACTION_REMOVE,
+            "order": int(ticket),
+        }
+        result = mt5.order_send(request)
+        if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
+            comment = result.comment if result else "internal MT5 error"
+            code = result.retcode if result else "N/A"
+            raise Exception(f"Cancel failed: {comment} (Code: {code})")
+        return result
 
     def get_candles(self, symbol, timeframe, count=500, before=None):
         if timeframe not in TIMEFRAME_MAP:
@@ -160,35 +242,25 @@ class MT5Service:
         if before:
             before_dt = datetime.fromisoformat(before.replace("Z", "+00:00"))
             before_dt = before_dt - timedelta(seconds=1)
-
-            rates = mt5.copy_rates_from(
-                symbol, 
-                TIMEFRAME_MAP[timeframe], 
-                before_dt, 
-                count
-            )
+            rates = mt5.copy_rates_from(symbol, TIMEFRAME_MAP[timeframe], before_dt, count)
         else:
-            rates = mt5.copy_rates_from_pos(
-                symbol, 
-                TIMEFRAME_MAP[timeframe], 
-                0, 
-                count
-            )
+            rates = mt5.copy_rates_from_pos(symbol, TIMEFRAME_MAP[timeframe], 0, count)
 
         if rates is None:
             return []
 
         candles = []
         for candle in rates:
+            # Guard against malformed bars (missing/zero OHLC) that would
+            # otherwise distort the chart's price axis.
+            if candle["open"] <= 0 or candle["high"] <= 0 or candle["low"] <= 0 or candle["close"] <= 0:
+                continue
             candles.append({
-                "time": datetime.fromtimestamp(
-                    candle["time"], tz=timezone.utc
-                ).isoformat(),
+                "time": datetime.fromtimestamp(candle["time"], tz=timezone.utc).isoformat(),
                 "open": float(candle["open"]),
                 "high": float(candle["high"]),
                 "low": float(candle["low"]),
                 "close": float(candle["close"]),
-                "volume": int(candle["tick_volume"])
+                "volume": int(candle["tick_volume"]),
             })
-
         return candles

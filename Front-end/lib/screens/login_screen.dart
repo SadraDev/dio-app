@@ -19,25 +19,47 @@ class _LoginScreenState extends State<LoginScreen> {
   Future<void> login() async {
     setState(() => loading = true);
 
-    final success = await AuthService.login(
-      usernameController.text,
-      passwordController.text,
-    );
-
-    setState(() => loading = false);
-
-    if (!mounted) return;
-
-    if (success) {
-      print("passed");
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(builder: (_) => const HomeScreen()),
+    try {
+      final success = await AuthService.login(
+        usernameController.text.trim(),
+        passwordController.text.trim(),
       );
-    } else {
+
+      if (!mounted) return;
+
+      if (success) {
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(builder: (_) => const HomeScreen()),
+        );
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text("Wrong username or password."),
+            backgroundColor: Colors.redAccent,
+          ),
+        );
+      }
+    } catch (e) {
+      if (!mounted) return;
+
+      String errorMessage = "Login failed. Please check your connection.";
+      String errorText = e.toString().toLowerCase();
+
+      if (errorText.contains("unauthorized") || errorText.contains("wrong password") || errorText.contains("credentials")) {
+        errorMessage = "Wrong username or password.";
+      } else if (errorText.isNotEmpty) {
+        errorMessage = e.toString().replaceAll("Exception: ", "");
+      }
+
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("Login failed")),
+        SnackBar(
+          content: Text(errorMessage),
+          backgroundColor: Colors.redAccent,
+        ),
       );
+    } finally {
+      if (mounted) setState(() => loading = false);
     }
   }
 
@@ -54,9 +76,7 @@ class _LoginScreenState extends State<LoginScreen> {
                 size: 80,
                 color: Colors.green,
               ),
-
               const SizedBox(height: 20),
-
               const Text(
                 "Dio Trader",
                 style: TextStyle(
@@ -65,9 +85,7 @@ class _LoginScreenState extends State<LoginScreen> {
                   fontWeight: FontWeight.bold,
                 ),
               ),
-
               const SizedBox(height: 40),
-
               TextField(
                 controller: usernameController,
                 style: const TextStyle(color: Colors.white),
@@ -81,9 +99,7 @@ class _LoginScreenState extends State<LoginScreen> {
                   ),
                 ),
               ),
-
               const SizedBox(height: 20),
-
               TextField(
                 controller: passwordController,
                 obscureText: true,
@@ -98,9 +114,7 @@ class _LoginScreenState extends State<LoginScreen> {
                   ),
                 ),
               ),
-
               const SizedBox(height: 30),
-
               SizedBox(
                 width: double.infinity,
                 height: 55,
@@ -111,7 +125,6 @@ class _LoginScreenState extends State<LoginScreen> {
                       : const Text("LOGIN"),
                 ),
               ),
-
               TextButton(
                 onPressed: () {
                   Navigator.push(

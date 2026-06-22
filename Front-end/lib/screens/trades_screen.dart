@@ -1,8 +1,13 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../models/account.dart';
 import '../models/position.dart';
+import '../models/pending_order.dart';
 import '../models/trade_history.dart';
+import '../services/api_client.dart';
+import '../services/trade_service.dart';
+import '../widgets/account_card.dart';
 
 class TradesScreen extends StatefulWidget {
   const TradesScreen({super.key});
@@ -12,125 +17,211 @@ class TradesScreen extends StatefulWidget {
 }
 
 class _TradesScreenState extends State<TradesScreen> {
-  // MOCK DATA (replace with Django API later)
+  AccountData? account;
+  List<Position> positions = [];
+  List<PendingOrder> orders = [];
+  List<TradeHistory> history = [];
 
-  late AccountData account;
-  late List<Position> positions;
-  late List<TradeHistory> history;
+  bool _isLoading = true;
+  bool _isFetching = false; // Prevents overlapping requests
+  String? _error;
+
+  Timer? _timer;
 
   @override
   void initState() {
     super.initState();
-    _loadMockData();
+    // Initial fetch with the loading spinner
+    _fetchData(showLoading: true);
+    _startPolling();
   }
 
-  void _loadMockData() {
-    account = AccountData(
-      balance: 10000,
-      equity: 10250,
-      marginLevel: 2.0,
-      margin: 1200,
-      freeMargin: 8800,
-      currency: '',
-    );
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
 
-    positions = [
-      Position(
-        pair: "EUR/USD",
-        type: "BUY",
-        lot: 0.10,
-        entry: 1.0850,
-        current: 1.0890,
-        profit: 40,
-      ),
-      Position(
-        pair: "GBP/USD",
-        type: "SELL",
-        lot: 0.20,
-        entry: 1.2740,
-        current: 1.2710,
-        profit: 60,
-      ),
-    ];
+  void _startPolling() {
+    _timer?.cancel();
+    // Polls the backend every 2 seconds for near real-time updates
+    _timer = Timer.periodic(const Duration(seconds: 2), (_) {
+      if (!mounted || _isFetching) return;
+      _fetchData(showLoading: false); // Silent background fetch
+    });
+  }
 
-    history = [
-      TradeHistory(
-        pair: "USD/JPY",
-        type: "BUY",
-        profit: -15,
-        closedAt: "2026-06-16",
-      ),
-      TradeHistory(
-        pair: "XAU/USD",
-        type: "SELL",
-        profit: 120,
-        closedAt: "2026-06-15",
-      ),
-    ];
+  Future<void> _fetchData({bool showLoading = true}) async {
+    if (_isFetching) return;
+    _isFetching = true;
+
+    if (showLoading) {
+      setState(() {
+        _isLoading = true;
+        _error = null;
+      });
+    }
+
+    try {
+      final results = await Future.wait([
+        ApiClient.get('/accounts/info/').catchError((e) {
+          debugPrint("Account fetch failed: $e");
+          return null;
+        }),
+        ApiClient.get('/execution/trading-data/').catchError((e) {
+          debugPrint("Trading data fetch failed: $e");
+          return null;
+        }),
+      ]);
+
+      if (!mounted) return;
+
+      setState(() {
+        if (results[0] != null) {
+          account = AccountData.fromJson(results[0]);
+        }
+
+        if (results[1] != null) {
+          final tradeData = results[1] as Map<String, dynamic>;
+
+          // Parse Positions
+          final rawPositions = tradeData['positions'] as List? ?? [];
+          positions = rawPositions
+              .map((p) => Position.fromJson(p as Map<String, dynamic>))
+              .toList();
+
+          // Parse Pending Orders
+          final rawOrders = tradeData['orders'] as List? ?? [];
+          orders = rawOrders
+              .map((o) => PendingOrder.fromJson(o as Map<String, dynamic>))
+              .toList();
+
+          // Parse & Sort History (Descending based on timestamp string)
+          final rawDeals = tradeData['deals'] as List? ?? [];
+          history = rawDeals
+              .map((h) => TradeHistory.fromJson(h as Map<String, dynamic>))
+              .toList();
+          history.sort((a, b) => b.closedAt.compareTo(a.closedAt));
+        }
+      });
+
+      if (account == null &&
+          positions.isEmpty &&
+          history.isEmpty &&
+          orders.isEmpty) {
+        if (showLoading) {
+          _error = "Failed to connect to server. Swipe down to retry.";
+        }
+      } else {
+        _error = null; // Clear error if a background fetch succeeds
+      }
+    } catch (e) {
+      if (!mounted) return;
+      if (showLoading) setState(() => _error = "Unexpected error: $e");
+    } finally {
+      _isFetching = false;
+      if (mounted && showLoading) setState(() => _isLoading = false);
+    }
+  }
+
+  // --- API Action Handlers ---
+
+  Future<void> _closePosition(int ticket) async {
+    try {
+      await TradeService.closePosition(ticket);
+      _fetchData(showLoading: false);
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text("Failed to close position: $e"),
+          backgroundColor: Colors.redAccent,
+        ),
+      );
+    }
+  }
+
+  Future<void> _cancelOrder(int ticket) async {
+    try {
+      await TradeService.cancelOrder(ticket);
+      _fetchData(showLoading: false);
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text("Failed to cancel order: $e"),
+          backgroundColor: Colors.redAccent,
+        ),
+      );
+    }
   }
 
   @override
   Widget build(BuildContext context) {
     return SafeArea(
-      child: SingleChildScrollView(
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            _accountCard(),
-            const SizedBox(height: 15),
-            _sectionTitle("Open Positions"),
-            _positions(),
-            const SizedBox(height: 15),
-            _sectionTitle("Trade History"),
-            _history(),
-          ],
-        ),
-      ),
-    );
-  }
+      child: RefreshIndicator(
+        onRefresh: () => _fetchData(showLoading: true),
+        color: Colors.blueAccent,
+        backgroundColor: const Color(0xff162033),
+        child: _isLoading && account == null
+            ? const Center(child: CircularProgressIndicator())
+            : SingleChildScrollView(
+                physics: const AlwaysScrollableScrollPhysics(),
+                padding: const EdgeInsets.all(12),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    if (_error != null) ...[
+                      Text(
+                        _error!,
+                        style: const TextStyle(color: Colors.redAccent),
+                      ),
+                      const SizedBox(height: 15),
+                    ],
 
-  // ---------------- ACCOUNT ----------------
+                    AccountCard(data: account, history: []),
 
-  Widget _accountCard() {
-    return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: const Color(0xff162033),
-        borderRadius: BorderRadius.circular(16),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Text(
-            "Account Summary",
-            style: TextStyle(color: Colors.white, fontSize: 18),
-          ),
-          const SizedBox(height: 15),
+                    const SizedBox(height: 20),
+                    _sectionTitle("Open Positions"),
+                    if (positions.isEmpty && !_isLoading)
+                      const Padding(
+                        padding: EdgeInsets.symmetric(vertical: 8.0),
+                        child: Text(
+                          "No open positions",
+                          style: TextStyle(color: Colors.grey),
+                        ),
+                      )
+                    else
+                      _positions(),
 
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              _metric("Balance", account.balance),
-              _metric("Equity", account.equity),
-              _metric(
-                "PnL",
-                account.margin,
-                color: account.margin >= 0 ? Colors.green : Colors.red,
+                    const SizedBox(height: 20),
+                    _sectionTitle("Pending Orders"),
+                    if (orders.isEmpty && !_isLoading)
+                      const Padding(
+                        padding: EdgeInsets.symmetric(vertical: 8.0),
+                        child: Text(
+                          "No pending orders",
+                          style: TextStyle(color: Colors.grey),
+                        ),
+                      )
+                    else
+                      _orders(),
+
+                    const SizedBox(height: 20),
+                    _sectionTitle("Trade History"),
+                    if (history.isEmpty && !_isLoading)
+                      const Padding(
+                        padding: EdgeInsets.symmetric(vertical: 8.0),
+                        child: Text(
+                          "No trade history",
+                          style: TextStyle(color: Colors.grey),
+                        ),
+                      )
+                    else
+                      _history(),
+                  ],
+                ),
               ),
-            ],
-          ),
-
-          const SizedBox(height: 15),
-
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              _metric("Margin", account.margin),
-              _metric("Free", account.freeMargin),
-            ],
-          ),
-        ],
       ),
     );
   }
@@ -140,11 +231,16 @@ class _TradesScreenState extends State<TradesScreen> {
   Widget _positions() {
     return Column(
       children: positions.map((p) {
-        final isBuy = p.type == "BUY";
+        final isBuy = p.type.toUpperCase() == "BUY";
 
         return Container(
           margin: const EdgeInsets.only(bottom: 10),
-          padding: const EdgeInsets.all(12),
+          padding: const EdgeInsets.only(
+            left: 12,
+            top: 12,
+            bottom: 12,
+            right: 4,
+          ),
           decoration: BoxDecoration(
             color: const Color(0xff111827),
             borderRadius: BorderRadius.circular(12),
@@ -152,42 +248,178 @@ class _TradesScreenState extends State<TradesScreen> {
           child: Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
+              Expanded(
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          p.pair,
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontWeight: FontWeight.bold,
+                            fontSize: 15,
+                          ),
+                        ),
+                        const SizedBox(height: 4),
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 6,
+                            vertical: 2,
+                          ),
+                          decoration: BoxDecoration(
+                            color: (isBuy ? Colors.green : Colors.red)
+                                .withValues(alpha: 0.2),
+                            borderRadius: BorderRadius.circular(4),
+                          ),
+                          child: Text(
+                            "${p.type.toUpperCase()} ${p.lot}",
+                            style: TextStyle(
+                              color: isBuy ? Colors.green : Colors.redAccent,
+                              fontSize: 12,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    Column(
+                      crossAxisAlignment: CrossAxisAlignment.end,
+                      children: [
+                        Text(
+                          "Entry: ${p.entry}",
+                          style: const TextStyle(
+                            color: Colors.grey,
+                            fontSize: 13,
+                          ),
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                          "Now: ${p.current}",
+                          style: const TextStyle(
+                            color: Colors.grey,
+                            fontSize: 13,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 12),
+              Row(
                 children: [
                   Text(
-                    p.pair,
-                    style: const TextStyle(color: Colors.white),
-                  ),
-                  Text(
-                    "${p.type} ${p.lot}",
+                    "${p.profit > 0 ? '+' : ''}${p.profit.toStringAsFixed(2)}",
                     style: TextStyle(
-                      color: isBuy ? Colors.green : Colors.red,
+                      color: p.profit > 0
+                          ? Colors.green
+                          : (p.profit < 0 ? Colors.red : Colors.white),
+                      fontWeight: FontWeight.bold,
+                      fontSize: 16,
                     ),
                   ),
-                ],
-              ),
-
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.end,
-                children: [
-                  Text(
-                    "Entry: ${p.entry}",
-                    style: const TextStyle(color: Colors.grey),
-                  ),
-                  Text(
-                    "Now: ${p.current}",
-                    style: const TextStyle(color: Colors.grey),
+                  const SizedBox(width: 4),
+                  IconButton(
+                    icon: const Icon(Icons.close, color: Colors.grey, size: 20),
+                    onPressed: () => _closePosition(p.ticket),
+                    constraints: const BoxConstraints(),
+                    padding: const EdgeInsets.all(8),
                   ),
                 ],
               ),
+            ],
+          ),
+        );
+      }).toList(),
+    );
+  }
 
-              Text(
-                "${p.profit >= 0 ? '+' : ''}${p.profit}",
-                style: TextStyle(
-                  color: p.profit >= 0 ? Colors.green : Colors.red,
-                  fontWeight: FontWeight.bold,
+  // ---------------- PENDING ORDERS ----------------
+
+  Widget _orders() {
+    return Column(
+      children: orders.map((o) {
+        return Container(
+          margin: const EdgeInsets.only(bottom: 10),
+          padding: const EdgeInsets.only(
+            left: 12,
+            top: 12,
+            bottom: 12,
+            right: 4,
+          ),
+          decoration: BoxDecoration(
+            color: const Color(0xff111827),
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Expanded(
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          o.symbol,
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontWeight: FontWeight.bold,
+                            fontSize: 15,
+                          ),
+                        ),
+                        const SizedBox(height: 4),
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 6,
+                            vertical: 2,
+                          ),
+                          decoration: BoxDecoration(
+                            color: Colors.amber.withValues(alpha: 0.2),
+                            borderRadius: BorderRadius.circular(4),
+                          ),
+                          child: Text(
+                            "${o.type} ${o.volume}",
+                            style: const TextStyle(
+                              color: Colors.amber,
+                              fontSize: 12,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    Column(
+                      crossAxisAlignment: CrossAxisAlignment.end,
+                      children: [
+                        const Text(
+                          "Target",
+                          style: TextStyle(color: Colors.grey, fontSize: 11),
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                          o.price.toStringAsFixed(5),
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 14,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
                 ),
+              ),
+              const SizedBox(width: 12),
+              IconButton(
+                icon: const Icon(Icons.close, color: Colors.grey, size: 20),
+                onPressed: () => _cancelOrder(o.ticket),
+                constraints: const BoxConstraints(),
+                padding: const EdgeInsets.all(8),
               ),
             ],
           ),
@@ -201,6 +433,8 @@ class _TradesScreenState extends State<TradesScreen> {
   Widget _history() {
     return Column(
       children: history.map((h) {
+        final isBuy = h.type.toUpperCase() == "BUY";
+
         return Container(
           margin: const EdgeInsets.only(bottom: 10),
           padding: const EdgeInsets.all(12),
@@ -216,20 +450,42 @@ class _TradesScreenState extends State<TradesScreen> {
                 children: [
                   Text(
                     h.pair,
-                    style: const TextStyle(color: Colors.white),
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.bold,
+                      fontSize: 15,
+                    ),
                   ),
+                  const SizedBox(height: 4),
                   Text(
-                    h.type,
-                    style: const TextStyle(color: Colors.grey),
+                    h.type.toUpperCase(),
+                    style: TextStyle(
+                      color: isBuy ? Colors.blueAccent : Colors.redAccent,
+                      fontSize: 12,
+                      fontWeight: FontWeight.bold,
+                    ),
                   ),
                 ],
               ),
-              Text(
-                "${h.profit >= 0 ? '+' : ''}${h.profit}",
-                style: TextStyle(
-                  color: h.profit >= 0 ? Colors.green : Colors.red,
-                  fontWeight: FontWeight.bold,
-                ),
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  Text(
+                    h.closedAt,
+                    style: const TextStyle(color: Colors.grey, fontSize: 12),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    "${h.profit > 0 ? '+' : ''}${h.profit.toStringAsFixed(2)}",
+                    style: TextStyle(
+                      color: h.profit > 0
+                          ? Colors.green
+                          : (h.profit < 0 ? Colors.red : Colors.white),
+                      fontWeight: FontWeight.bold,
+                      fontSize: 15,
+                    ),
+                  ),
+                ],
               ),
             ],
           ),
@@ -239,22 +495,6 @@ class _TradesScreenState extends State<TradesScreen> {
   }
 
   // ---------------- HELPERS ----------------
-
-  Widget _metric(String label, double value, {Color? color}) {
-    return Column(
-      children: [
-        Text(label, style: const TextStyle(color: Colors.grey)),
-        const SizedBox(height: 5),
-        Text(
-          value.toString(),
-          style: TextStyle(
-            color: color ?? Colors.white,
-            fontWeight: FontWeight.bold,
-          ),
-        ),
-      ],
-    );
-  }
 
   Widget _sectionTitle(String text) {
     return Padding(
