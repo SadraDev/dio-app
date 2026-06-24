@@ -46,7 +46,7 @@ class TwoHuntersConfigView(APIView):
         return Response(StrategyConfigSerializer(obj).data)
 
 
-# ── Live workers: start / control / snapshot ─────────────────────────────────
+# ── Live workers: start / control / update / snapshot ────────────────────────
 class StartProcessView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -59,7 +59,7 @@ class StartProcessView(APIView):
         if config is None:
             config = StrategyConfig.get_or_create_default("TwoHunters").config
         state = WorkerManager.instance().start(
-            symbol=data["symbol"], config=config, dry_run=data.get("dry_run", True))
+            symbol=data["symbol"], config=config)
         return Response(state)
 
 
@@ -79,11 +79,46 @@ class WorkerControlView(APIView):
         return Response(state)
 
 
+class WorkerUpdateConfigView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        worker_id = request.data.get("id")
+        new_config = request.data.get("config")
+
+        if not worker_id or not isinstance(new_config, dict):
+            return Response({"error": "Invalid payload. 'id' and 'config' (dict) are required."}, status=400)
+
+        mgr = WorkerManager.instance()
+        state = mgr.update_config(worker_id, new_config)
+
+        if state is None:
+            return Response({"error": f"worker '{worker_id}' not found"}, status=404)
+
+        return Response(state)
+
+
 class RunningStrategiesView(APIView):
+    """Gets the snapshot of ALL running workers AND recent system logs."""
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        return Response({"workers": WorkerManager.instance().snapshot()})
+        mgr = WorkerManager.instance()
+        return Response({
+            "workers": mgr.snapshot(),
+            "logs": mgr.get_logs()
+        })
+
+
+class WorkerStateView(APIView):
+    """Gets the live state of ONE specific worker by its UUID."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk):
+        state = WorkerManager.instance().get_worker_state(pk)
+        if not state:
+            return Response({"error": "Worker not found"}, status=404)
+        return Response(state)
 
 
 # ── Backtests ────────────────────────────────────────────────────────────────
@@ -103,10 +138,6 @@ class BacktestView(APIView):
             config=config, status="running",
         )
 
-        # Run synchronously. MetaTrader5's Python API is connection/thread
-        # sensitive, so we keep the backtest on the request thread instead of a
-        # background thread (more reliable for dev). Move to Celery later if the
-        # ranges get long.
         try:
             engine = TwoHunters(config=run.config)
             results = engine.backtest(

@@ -2,18 +2,17 @@
 Live worker manager for TwoHunters.
 Each "worker" is one strategy running on one symbol in its own thread.
 
-State is held in memory but BROADCAST via WebSockets to connected clients.
+State is held in memory and fetched via standard HTTP GET polling.
 """
 from __future__ import annotations
+import MetaTrader5 as mt5
 import threading
 import time
 import logging
+import uuid
+from collections import deque
 from datetime import datetime, time as dtime
 from typing import Dict, Optional, List, Any
-
-from asgiref.sync import async_to_sync
-from channels.layers import get_channel_layer
-
 from .engine.config import EngineConfig
 from .engine.strategies.two_hunters import TwoHunters
 from .engine.models.signal import SignalAction
@@ -22,6 +21,7 @@ logger = logging.getLogger("strategies.manager")
 
 # Phase constants
 HUNTING = "HUNTING_PHASE"
+MBOX_STILL_FORMING = "MBOX_STILL_FORMING"
 ORDER_PLACED = "ORDER_PLACED"
 POSITION_PLACED = "POSITION_PLACED"
 MONITORING = "MONITORING_SIGNAL"
@@ -29,7 +29,7 @@ DONE = "DONE"
 STOPPED = "STOPPED"
 PAUSED = "PAUSED"
 
-POLL_SECONDS = 5
+POLL_SECONDS = 1
 
 def _in_session(now: datetime, start: dtime, end: dtime) -> bool:
     """Handle normal and midnight-wrapping session windows."""
@@ -38,38 +38,27 @@ def _in_session(now: datetime, start: dtime, end: dtime) -> bool:
         return start <= t <= end
     return t >= start or t <= end
 
-def broadcast_state(state: dict):
-    """Pushes worker state updates down the WebSocket channel."""
-    channel_layer = get_channel_layer()
-    if channel_layer:
-        async_to_sync(channel_layer.group_send)(
-            "strategy_updates",
-            {
-                "type": "strategy_update",
-                "data": state
-            }
-        )
-
 class Worker:
-    def __init__(self, strategy: str, symbol: str, config: Dict[str, Any], dry_run: bool = True):
+    def __init__(self, strategy: str, symbol: str, config: Dict[str, Any]):
+        self.id = str(uuid.uuid4())
         self.strategy = strategy
         self.symbol = symbol
         self.config_dict = config
-        self.dry_run = dry_run
 
         self._kill = threading.Event()
         self._pause = threading.Event()
+        self._config_lock = threading.Lock()
         self._thread = threading.Thread(target=self._run, daemon=True)
 
         self.running = True
         self.phase = HUNTING
         self.message = "Worker starting"
+        
         self.hunt_current = 0
         self.hunt_total = int(EngineConfig(config).get("breakout.num_hunt_main", 2))
         self.session_open = False
         self.active_signal: Optional[dict] = None
         self.today = {"outcome": None, "net_gain": 0.0}
-        self._day = datetime.now().date()
 
         self._engine = TwoHunters(config=config)
 
@@ -85,12 +74,24 @@ class Worker:
     def kill(self):
         self._kill.set()
 
+    def update_config(self, new_config: dict):
+        with self._config_lock:
+            self.config_dict.update(new_config)
+            self.hunt_total = int(EngineConfig(self.config_dict).get("breakout.num_hunt_main", 2))
+            self._engine = TwoHunters(config=self.config_dict)
+        
+        self._set(self.phase, "Runtime configuration updated")
+
     @property
     def key(self) -> str:
-        return f"{self.strategy}::{self.symbol}"
+        return self.id
 
     def to_state(self) -> dict:
+        with self._config_lock:
+            current_config = self.config_dict.copy()
+            
         return {
+            "id": self.id,
             "strategy": self.strategy,
             "symbol": self.symbol,
             "running": self.running,
@@ -102,8 +103,7 @@ class Worker:
             "session_open": self.session_open,
             "active_signal": self.active_signal,
             "today": self.today,
-            "config": self.config_dict,
-            "dry_run": self.dry_run,
+            "config": current_config,
             "updated_at": datetime.now().isoformat(),
         }
 
@@ -120,12 +120,16 @@ class Worker:
             "ticket": sig.ticket,
         }
 
-    def _run(self):
-        logger.info("worker %s started (dry_run=%s)", self.key, self.dry_run)
-        cfg = EngineConfig(self.config_dict)
-        s_start = datetime.strptime(cfg.get("sessions.main.start"), "%H:%M").time()
-        s_end = datetime.strptime(cfg.get("sessions.main.end"), "%H:%M").time()
+    def _now(self):
+        rates = mt5.copy_rates_from_pos(self.symbol, mt5.TIMEFRAME_M1, 0, 1)
+        epoch_time = rates[0]['time']
+        _now = datetime.fromtimestamp(epoch_time)
+    
+        return _now
 
+    def _run(self):
+        self._day = self._now().date()
+        logger.info("worker %s started", self.key)
         self._set(HUNTING, f"Hunting phase 0/{self.hunt_total}, looking for setup")
         active_sig_obj = None
 
@@ -137,7 +141,14 @@ class Worker:
                     time.sleep(POLL_SECONDS)
                     continue
 
-                now = datetime.now()
+                now = self._now()
+                
+                with self._config_lock:
+                    cfg = EngineConfig(self.config_dict)
+                    s_start_str = cfg.get("sessions.main.start")
+                    s_end_str = cfg.get("sessions.main.end")
+                    s_start = datetime.strptime(s_start_str, "%H:%M").time()
+                    s_end = datetime.strptime(s_end_str, "%H:%M").time()
 
                 if now.date() != self._day:
                     self._day = now.date()
@@ -154,25 +165,28 @@ class Worker:
 
                 if active_sig_obj is None:
                     if not self.session_open:
-                        self._set(HUNTING, "Waiting for session window")
+                        self._set(MBOX_STILL_FORMING, "Waiting for session window")
                         time.sleep(POLL_SECONDS)
                         continue
 
-                    self.hunt_current = min(self.hunt_current + 1, self.hunt_total)
-                    self._set(HUNTING, f"Hunting phase {self.hunt_current}/{self.hunt_total}, scanning breakout")
+                    with self._config_lock:
+                        sig = self._engine.prepare_day(self.symbol, now)
 
-                    sig = self._engine.prepare_day(self.symbol, now)
+                        reached = getattr(self._engine.breakout_engine, 'current_hunt', 0)
+                        self.hunt_current = min(reached, self.hunt_total)
+
+                    self._set(HUNTING, f"Hunting phase {self.hunt_current}/{self.hunt_total}")
+                        
                     if sig is None:
                         time.sleep(POLL_SECONDS)
                         continue
 
                     active_sig_obj = sig
                     self.active_signal = self._sig_payload(sig)
-                    if not self.dry_run:
-                        self._place_order(sig)
+                    self._place_order(sig)
 
                     if sig.is_order:
-                        self._set(ORDER_PLACED, f"Setup found, pending {sig.action.value} order placed")
+                        self._set(ORDER_PLACED, f"Setup found, {sig.action.value} order placed")
                     else:
                         self._set(POSITION_PLACED, f"Setup found, {sig.action.value} position opened")
                     time.sleep(POLL_SECONDS)
@@ -194,33 +208,55 @@ class Worker:
         if self.phase != MONITORING:
             self._set(MONITORING, "Monitoring signal")
 
-        price = self._engine.fetcher.get_current_price(self.symbol)
-        if not price:
+        # Skip if the order failed to generate a ticket
+        if not getattr(sig, 'ticket', None):
+            self._set(MONITORING, "Waiting for order ticket...")
             return
 
-        cur = price["bid"] if sig.action == SignalAction.SELL else price["ask"]
-        gain = self._engine.budget.calculate_gain_loss(
-            self.symbol, sig.entry_price, cur, sig.entry_lot or 0.0, sig.action.value)
-        sig.gain = gain
-        self.active_signal = self._sig_payload(sig)
+        # 1. Check if it is currently an ACTIVE POSITION
+        positions = mt5.positions_get(ticket=sig.ticket)
+        if positions is None:
+            # MT5 connection error or busy, skip this tick to prevent false-closes
+            return 
+            
+        if len(positions) > 0:
+            pos = positions[0]
+            # Calculate true floating net profit (profit + commission + swap)
+            gain = pos.profit + getattr(pos, 'commission', 0.0) + getattr(pos, 'swap', 0.0)
+            
+            sig.gain = gain
+            self.active_signal = self._sig_payload(sig)
+            return
 
-        hit_tp = (sig.action == SignalAction.SELL and cur <= sig.take_profit) or \
-                 (sig.action == SignalAction.BUY and cur >= sig.take_profit)
-        hit_sl = (sig.action == SignalAction.SELL and cur >= sig.stop_loss) or \
-                 (sig.action == SignalAction.BUY and cur <= sig.stop_loss)
+        # 2. Check if it is still a PENDING ORDER
+        orders = mt5.orders_get(ticket=sig.ticket)
+        if orders is None:
+            return
+            
+        if len(orders) > 0:
+            sig.gain = 0.0
+            self.active_signal = self._sig_payload(sig)
+            self._set(MONITORING, "Pending order active, waiting for execution...")
+            return
 
-        if hit_tp or hit_sl:
-            outcome = "win" if hit_tp else "loss"
-            self.today = {"outcome": outcome, "net_gain": self.today["net_gain"] + gain}
-            if not self.dry_run:
-                self._close_position(sig)
+        # 3. If neither active nor pending, it HAS CLOSED (hit TP/SL or user closed it)
+        # We query the history deals linked to the initial position ticket
+        deals = mt5.history_deals_get(position=sig.ticket)
+        if deals is None:
+            return
+            
+        if len(deals) > 0:
+            # Calculate final realized net profit across all deals for this position
+            final_gain = sum(d.profit + getattr(d, 'commission', 0.0) + getattr(d, 'swap', 0.0) for d in deals)
+            outcome = "win" if final_gain >= 0 else "loss"
+            
+            self.today = {"outcome": outcome, "net_gain": self.today["net_gain"] + final_gain}
             self.active_signal = None
-            self._set(DONE, f"Signal closed {outcome.upper()} "
-                            f"{'+' if gain >= 0 else '-'}${abs(gain):.2f} - done for today")
-            return
-
-        self._set(MONITORING, f"Monitoring signal, floating "
-                              f"{'+' if gain >= 0 else '-'}${abs(gain):.2f}")
+            self._set(DONE, f"Signal closed {outcome.upper()} {'+' if final_gain >= 0 else '-'}${abs(final_gain):.2f} - done for today")
+        else:
+            # 4. Fallback: Pending order was cancelled manually before it ever triggered
+            self.active_signal = None
+            self._set(DONE, "Order cancelled before execution - done for today")
 
     def _place_order(self, sig):
         try:
@@ -249,11 +285,13 @@ class Worker:
             logger.error("worker %s close failed:\n%s", self.key, traceback.format_exc())
 
     def _set(self, phase: str, message: str):
-        self.phase = phase
-        self.message = message
-        # Broadcast immediately upon state mutation
-        broadcast_state(self.to_state())
-
+            self.phase = phase
+            self.message = message
+            
+            # Prevent duplicate consecutive logs from flooding the home screen
+            if getattr(self, "_last_log_msg", None) != message:
+                self._last_log_msg = message
+                WorkerManager.instance().add_log(self.symbol, message)
 
 class WorkerManager:
     _instance: Optional["WorkerManager"] = None
@@ -261,6 +299,8 @@ class WorkerManager:
 
     def __init__(self):
         self._workers: Dict[str, Worker] = {}
+        # Stores the latest 50 system logs
+        self.system_logs: deque = deque(maxlen=50)
 
     @classmethod
     def instance(cls) -> "WorkerManager":
@@ -269,14 +309,22 @@ class WorkerManager:
                 cls._instance = WorkerManager()
         return cls._instance
 
-    def start(self, symbol: str, config: Dict[str, Any], strategy: str = "TwoHunters",
-              dry_run: bool = True) -> dict:
-        key = f"{strategy}::{symbol}"
-        existing = self._workers.get(key)
-        if existing and existing.running and not existing._kill.is_set():
-            return existing.to_state()
-        worker = Worker(strategy, symbol, config, dry_run=dry_run)
-        self._workers[key] = worker
+    def add_log(self, symbol: str, msg: str):
+        """Adds a timestamped log to the queue."""
+        ts = datetime.now().strftime("%H:%M")
+        self.system_logs.appendleft({
+            "timestamp": ts,
+            "symbol": symbol,
+            "message": msg
+        })
+
+    def get_logs(self) -> List[dict]:
+        """Returns the recent logs in order (newest first)."""
+        return list(self.system_logs)
+
+    def start(self, symbol: str, config: Dict[str, Any], strategy: str = "TwoHunters") -> dict:
+        worker = Worker(strategy, symbol, config)
+        self._workers[worker.key] = worker
         worker.start()
         return worker.to_state()
 
@@ -303,10 +351,20 @@ class WorkerManager:
         state["running"] = False
         state["phase"] = STOPPED
         self._workers.pop(key, None)
-        
-        # Broadcast the killed state so UI drops it
-        broadcast_state(state)
         return state
+
+    def update_config(self, key: str, new_config: dict) -> Optional[dict]:
+        w = self._workers.get(key)
+        if not w:
+            return None
+        w.update_config(new_config)
+        return w.to_state()
+
+    def get_worker_state(self, key: str) -> Optional[dict]:
+        w = self._workers.get(key)
+        if not w:
+            return None
+        return w.to_state()
 
     def snapshot(self) -> List[dict]:
         return [w.to_state() for w in self._workers.values()]

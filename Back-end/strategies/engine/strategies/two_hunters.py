@@ -97,44 +97,52 @@ class TwoHunters:
 
     # --- entry calculation ---------------------------------------------------
     def calculate_entry_details(self, action: SignalAction, signal_bar: Bar,
-                                extrema: float) -> Tuple[float, float, float, bool]:
-        before_bar, after_bar = self._get_surrounding_bars(signal_bar)
-        if not before_bar or not after_bar:
-            before_bar = after_bar = signal_bar
+                                    extrema: float) -> Tuple[float, float, float, bool]:
 
-        entry_price = signal_bar.close
-        min_fvg, max_fvg = self.fvg_range
+            before_bar, after_bar = self._get_surrounding_bars(signal_bar)
+            if not before_bar or not after_bar:
+                before_bar = after_bar = signal_bar
 
-        def dynamic_fvg_scale(fvg_size_pips: float) -> float:
-            if min_fvg <= fvg_size_pips <= max_fvg:
-                t = (fvg_size_pips - min_fvg) / (max_fvg - min_fvg)
-                return 0.8 - (t * 0.2)
-            if fvg_size_pips <= min_fvg:
-                return 1.0
-            return 0.6
+            min_fvg, max_fvg = self.fvg_range
 
-        scale = 1.0
-        if action == SignalAction.SELL:
-            if before_bar.bid_low > signal_bar.close:
-                fvg_size_pips = self.budget.pips_from_diff(extrema - signal_bar.bid_low)
-                scale = dynamic_fvg_scale(fvg_size_pips)
-                if scale != 1.0:
-                    entry_price = extrema - abs(signal_bar.bid_low - extrema) * scale
-            diff = self.budget.diff_from_pips(self.margin_pips)
-            stop_loss = self.ratios["stop_loss"] * (extrema + diff)
-            take_profit = entry_price - self.ratios["take_profit"] * abs(entry_price - stop_loss)
+            def dynamic_fvg_scale(fvg_size_pips: float) -> float:
+                if min_fvg <= fvg_size_pips <= max_fvg:
+                    t = (fvg_size_pips - min_fvg) / (max_fvg - min_fvg)
+                    return 0.8 - (t * 0.2)
+                if fvg_size_pips <= min_fvg:
+                    return 1.0
+                return 0.6
 
-        else:  # BUY
-            if signal_bar.close + (signal_bar.spread or 0.0) > before_bar.ask_high:
-                fvg_size_pips = self.budget.pips_from_diff(signal_bar.ask_high - extrema)
-                scale = dynamic_fvg_scale(fvg_size_pips)
-                if scale != 1.0:
-                    entry_price = extrema + abs(extrema - signal_bar.ask_high) * scale
-            diff = self.budget.diff_from_pips(self.margin_pips)
-            stop_loss = self.ratios["stop_loss"] * (extrema - diff)
-            take_profit = entry_price + self.ratios["take_profit"] * abs(entry_price - stop_loss)
+            scale = 1.0
+            if action == SignalAction.SELL:
+                # SELL defaults to Bid price
+                entry_price = signal_bar.close 
 
-        return entry_price, stop_loss, take_profit, scale < 1.0
+                if before_bar.bid_low > signal_bar.close:
+                    fvg_size_pips = self.budget.pips_from_diff(extrema - signal_bar.bid_low)
+                    scale = dynamic_fvg_scale(fvg_size_pips)
+                    if scale != 1.0:
+                        entry_price = extrema - abs(signal_bar.bid_low - extrema) * scale
+                
+                diff = self.budget.diff_from_pips(self.margin_pips)
+                stop_loss = self.ratios["stop_loss"] * (extrema + diff)
+                take_profit = entry_price - self.ratios["take_profit"] * abs(entry_price - stop_loss)
+
+            else:  # BUY
+                # BUY defaults to Ask price
+                entry_price = signal_bar.close + (signal_bar.spread or 0.0)
+                
+                if signal_bar.close + (signal_bar.spread or 0.0) > before_bar.ask_high:
+                    fvg_size_pips = self.budget.pips_from_diff(signal_bar.ask_high - extrema)
+                    scale = dynamic_fvg_scale(fvg_size_pips)
+                    if scale != 1.0:
+                        entry_price = extrema + abs(extrema - signal_bar.ask_high) * scale
+                
+                diff = self.budget.diff_from_pips(self.margin_pips)
+                stop_loss = self.ratios["stop_loss"] * (extrema - diff)
+                take_profit = entry_price + self.ratios["take_profit"] * abs(entry_price - stop_loss)
+
+            return entry_price, stop_loss, take_profit, scale < 1.0
 
     def create_signal(self, action: SignalAction, entry_price: float, stop_loss: float,
                       take_profit: float, timestamp: datetime) -> Signal:
@@ -151,7 +159,7 @@ class TwoHunters:
 
         mbox_result = self.mbox_analyzer.calculate(mbox_bars)
         self.breakout_engine.symbol = self.symbol
-        extrema, signal_bar, action, hunter_bar, _ = self.breakout_engine.breakout(session_bars, mbox_result)
+        extrema, signal_bar, action, _, _ = self.breakout_engine.breakout(session_bars, mbox_result)
         if not signal_bar:
             return None
 
@@ -168,12 +176,6 @@ class TwoHunters:
         signal.entry_lot = self.budget.lots_from_diff(signal.symbol, _r)
         signal.stop_loss_pips = self.budget.pips_from_diff(_r)
         signal.take_profit_pips = self.budget.pips_from_diff(abs(signal.take_profit - signal.entry_price))
-
-        # 2R protective initial TP (matches the default-breakout branch in DIO).
-        if action == "BUY":
-            signal.initial_take_profit = signal.entry_price + abs(signal.entry_price - signal.stop_loss) * 2.0
-        else:
-            signal.initial_take_profit = signal.entry_price - abs(signal.entry_price - signal.stop_loss) * 2.0
 
         return signal
 

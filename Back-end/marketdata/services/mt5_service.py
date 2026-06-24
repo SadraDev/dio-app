@@ -93,7 +93,7 @@ class MT5Service:
     # internal: send a request, retrying IOC then FOK filling modes
     # ──────────────────────────────────────────────────────────────────
     def _send_with_filling(self, request, error_label="Order"):
-        filling_modes = [mt5.ORDER_FILLING_IOC, mt5.ORDER_FILLING_FOK]
+        filling_modes = [mt5.ORDER_FILLING_FOK, mt5.ORDER_FILLING_IOC]
         last_result = None
         for filling_mode in filling_modes:
             request["type_filling"] = filling_mode
@@ -149,8 +149,8 @@ class MT5Service:
             "volume": float(volume),
             "type": order_type,
             "price": float(price),
-            "sl": float(sl),
-            "tp": float(tp),
+            # "sl": float(sl),
+            # "tp": float(tp),
             "deviation": 20,
             "magic": magic,
             "comment": "API Order",

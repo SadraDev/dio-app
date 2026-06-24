@@ -24,6 +24,7 @@ class BreakoutEngine:
         self.num_hunt = num_hunt
         self.symbol = symbol
         self.fetcher = fetcher or DataFetcher()
+        self.current_hunt = 0
 
     def _get_threshold_time(self) -> time:
         end_time = datetime.strptime(self.config.get("mbox_time.end"), "%H:%M")
@@ -37,6 +38,7 @@ class BreakoutEngine:
 
     def default(self, session_bars: List[Bar], box: dict
                 ) -> Tuple[Optional[float], Optional[Bar], Optional[str], Optional[Bar], Optional[float]]:
+        self.current_hunt = 0
         lookahead = 1
         if not session_bars or not box:
             return None, None, None, None, None
@@ -81,6 +83,7 @@ class BreakoutEngine:
         for i, bar in enumerate(session_bars):
             if i + lookahead >= n:
                 break
+            
 
             current_max = bar.high
             current_min = bar.low
@@ -88,6 +91,7 @@ class BreakoutEngine:
             is_local_min = all(current_min < session_bars[j].low for j in range(i + 1, min(i + 1 + lookahead, n)))
 
             if is_local_max and current_max > max_val:
+                self.current_hunt = max(self.current_hunt, breakout_stage_up)
                 breakout_stage_up += 1
                 max_val = current_max
                 if breakout_stage_up >= up_num_hunt:
@@ -109,6 +113,7 @@ class BreakoutEngine:
 
             elif is_local_min and current_min < min_val:
                 breakout_stage_down += 1
+                self.current_hunt = max(self.current_hunt, breakout_stage_down)
                 min_val = current_min
                 if breakout_stage_down >= down_num_hunt:
                     if bar.timestamp.time() < self._get_threshold_time() and not _threshold_time_triggered:
