@@ -1,9 +1,3 @@
-/// Live state model for a single strategy worker (one strategy on one symbol).
-///
-/// Field names / enum strings mirror the payload the Django backend now
-/// publishes over Channels (see strategies/manager.py -> Worker.to_state), so
-/// the SAME model parses the WebSocket feed and the REST snapshot.
-
 enum WorkerPhase {
   stopped,
   paused,
@@ -106,6 +100,7 @@ class WorkerToday {
 }
 
 class WorkerState {
+  final String id;
   final String strategy; // e.g. "TwoHunters"
   final String symbol; // e.g. "EURUSD"
   final bool running;
@@ -122,6 +117,7 @@ class WorkerState {
   final DateTime updatedAt;
 
   WorkerState({
+    required this.id,
     required this.strategy,
     required this.symbol,
     required this.running,
@@ -135,11 +131,11 @@ class WorkerState {
     this.paused = false,
     this.activeSignal,
     this.config = const {},
-    this.dryRun = true,
+    this.dryRun = false,
   });
 
   /// Stable key used to identify a worker across updates.
-  String get key => '$strategy::$symbol';
+  String get key => id;
 
   bool get isInTrade =>
       phase == WorkerPhase.orderPlaced ||
@@ -174,6 +170,7 @@ class WorkerState {
 
   factory WorkerState.fromJson(Map<String, dynamic> json) {
     return WorkerState(
+      id: json['id']?.toString() ?? '',
       strategy: (json['strategy'] ?? 'Strategy').toString(),
       symbol: (json['symbol'] ?? '').toString(),
       running: json['running'] ?? false,
@@ -183,17 +180,19 @@ class WorkerState {
       huntCurrent: json['hunt_current'] ?? 0,
       huntTotal: json['hunt_total'] ?? 2,
       sessionOpen: json['session_open'] ?? false,
+
+      // Safely handle active_signal which can be null
       activeSignal: json['active_signal'] == null
           ? null
-          : ActiveSignal.fromJson(
-              Map<String, dynamic>.from(json['active_signal'])),
-      today: WorkerToday.fromJson(json['today'] == null
-          ? null
-          : Map<String, dynamic>.from(json['today'])),
+          : ActiveSignal.fromJson(Map<String, dynamic>.from(json['active_signal'])),
+
+      // Safely handle today
+      today: WorkerToday.fromJson(json['today'] as Map<String, dynamic>?),
+
       config: json['config'] == null
           ? const {}
           : Map<String, dynamic>.from(json['config']),
-      dryRun: json['dry_run'] ?? true,
+
       updatedAt: json['updated_at'] != null
           ? DateTime.tryParse(json['updated_at'].toString()) ?? DateTime.now()
           : DateTime.now(),
@@ -216,6 +215,7 @@ class WorkerState {
     DateTime? updatedAt,
   }) {
     return WorkerState(
+      id: id,
       strategy: strategy,
       symbol: symbol,
       running: running ?? this.running,

@@ -179,7 +179,7 @@ class _TradesScreenState extends State<TradesScreen> {
                       const SizedBox(height: 15),
                     ],
 
-                    AccountCard(data: account, history: []),
+                    AccountCard(data: account, history: history),
 
                     const SizedBox(height: 20),
                     _sectionTitle("Open Positions"),

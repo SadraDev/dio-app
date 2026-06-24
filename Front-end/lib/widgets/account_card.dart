@@ -22,8 +22,9 @@ class AccountCard extends StatelessWidget {
     // 1. Calculate Financials
     final double totalRealizedPnL = history.fold(
       0.0,
-      (sum, h) => sum + h.profit,
+          (sum, h) => sum + h.profit,
     );
+
     final double usagePercent = d.equity > 0
         ? (d.margin / d.equity) * 100
         : 0.0;
@@ -33,14 +34,20 @@ class AccountCard extends StatelessWidget {
     final bool plPositive = floatingPl >= 0;
     final Color plColor = plPositive ? Colors.green : Colors.redAccent;
 
+    // 3. Card Background Styling based on margin usage
+    final bool isWarning = usagePercent >= 70;
+    final List<Color> cardGradient = isWarning
+        ? const [Color(0xff3a1c1c), Color(0xff241212)] // Red warning shade
+        : const [Color(0xff1b2740), Color(0xff141d30)]; // Default blue/navy shade
+
     return Container(
       padding: const EdgeInsets.all(20),
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(18),
-        gradient: const LinearGradient(
+        gradient: LinearGradient(
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
-          colors: [Color(0xff1b2740), Color(0xff141d30)],
+          colors: cardGradient,
         ),
         border: Border.all(color: Colors.white.withValues(alpha: 0.06)),
       ),
@@ -116,10 +123,10 @@ class AccountCard extends StatelessWidget {
             children: [
               Expanded(
                 child: _stat(
-                  "Margin Used",
-                  "${usagePercent.toStringAsFixed(1)}%",
-                  Icons.pie_chart,
-                  _usageColor(usagePercent),
+                  "Free Margin",
+                  d.freeMargin.toStringAsFixed(2),
+                  Icons.account_balance_wallet_outlined,
+                  Colors.greenAccent,
                 ),
               ),
               Expanded(
@@ -133,7 +140,7 @@ class AccountCard extends StatelessWidget {
             ],
           ),
 
-          // Margin Left Bar
+          // Margin Used Bar
           const SizedBox(height: 20),
           _marginBar(usagePercent),
         ],
@@ -147,17 +154,9 @@ class AccountCard extends StatelessWidget {
     return Colors.redAccent;
   }
 
-  // Color logic for Margin Left: >70 (Green), >30 (Orange), <=30 (Red)
-  Color _marginLeftColor(double left) {
-    if (left > 70) return Colors.greenAccent;
-    if (left > 30) return Colors.orangeAccent;
-    return Colors.redAccent;
-  }
-
   Widget _marginBar(double usagePercent) {
-    final double marginLeftPercent = (100 - usagePercent).clamp(0.0, 100.0);
-    final frac = (1 - usagePercent / 100).clamp(0.0, 1.0);
-    final color = _marginLeftColor(marginLeftPercent);
+    final frac = (usagePercent / 100).clamp(0.0, 1.0);
+    final color = _usageColor(usagePercent);
 
     return Column(
       children: [
@@ -165,11 +164,11 @@ class AccountCard extends StatelessWidget {
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
             const Text(
-              "Margin Left",
+              "Margin Used",
               style: TextStyle(color: Colors.white38, fontSize: 11),
             ),
             Text(
-              "${marginLeftPercent.toStringAsFixed(1)}%",
+              "${usagePercent.toStringAsFixed(1)}%",
               style: TextStyle(
                 color: color,
                 fontSize: 11,

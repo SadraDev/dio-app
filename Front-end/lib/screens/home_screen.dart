@@ -23,6 +23,7 @@ class _HomeScreenState extends State<HomeScreen> {
   int currentIndex = 0;
   AccountData? _accountData;
   List<TradeHistory> _history = [];
+  List<Map<String, dynamic>> _logs = []; // Added logs state
   final StrategyService _strategy = PollingStrategyService();
   Timer? _timer;
 
@@ -51,17 +52,28 @@ class _HomeScreenState extends State<HomeScreen> {
       final results = await Future.wait([
         ApiClient.get('/accounts/info/'),
         ApiClient.get('/execution/trading-data/'),
+        ApiClient.get('/strategies/workers/'), // Fetch logs directly from backend
       ]);
 
       if (mounted && results[0] != null) {
         setState(() {
+          // 1. Account Data
           _accountData = AccountData.fromJson(results[0]);
+
+          // 2. Trade History
           if (results[1] != null) {
             final tradeData = results[1] as Map<String, dynamic>;
             final rawDeals = tradeData['deals'] as List? ?? [];
             _history = rawDeals
                 .map((h) => TradeHistory.fromJson(h as Map<String, dynamic>))
                 .toList();
+          }
+
+          // 3. System Logs
+          if (results[2] != null) {
+            final stratData = results[2] as Map<String, dynamic>;
+            final logsRaw = stratData['logs'] as List? ?? [];
+            _logs = List<Map<String, dynamic>>.from(logsRaw);
           }
         });
       }
@@ -94,7 +106,8 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   Widget build(BuildContext context) {
     final List<Widget> pages = [
-      HomeDashboard(accountData: _accountData, strategy: _strategy, history: _history),
+      // Passed _logs down to the HomeDashboard
+      HomeDashboard(accountData: _accountData, strategy: _strategy, history: _history, logs: _logs),
       const ChartScreen(),
       const TradesScreen(),
       StrategyScreen(strategy: _strategy),
@@ -112,7 +125,7 @@ class _HomeScreenState extends State<HomeScreen> {
             initialData: _strategy.snapshot,
             builder: (context, snap) {
               final anyRunning = (snap.data ?? []).any(
-                (w) => w.running && !w.paused,
+                    (w) => w.running && !w.paused,
               );
               return Padding(
                 padding: const EdgeInsets.only(right: 24),
@@ -152,10 +165,12 @@ class HomeDashboard extends StatelessWidget {
   final AccountData? accountData;
   final StrategyService strategy;
   final List<TradeHistory> history;
+  final List<Map<String, dynamic>> logs;
 
   const HomeDashboard({
     super.key,
     required this.strategy,
+    required this.logs,
     this.accountData,
     this.history = const [],
   });
@@ -205,25 +220,25 @@ class HomeDashboard extends StatelessWidget {
               initialData: strategy.snapshot,
               builder: (context, snap) {
                 final workers = snap.data ?? [];
-                if (workers.isEmpty)
+                if (workers.isEmpty) {
                   return _placeholder("No running strategies.");
+                }
                 return Column(
-                  children: workers
-                      .map(
+                  children: workers.map(
                         (w) => StrategyCard(
-                          state: w,
-                          onPause: () => strategy.pause(w.key),
-                          onResume: () => strategy.resume(w.key),
-                          onKill: () => _confirmKill(context, w),
-                        ),
-                      )
+                      state: w,
+                      onPause: () => strategy.pause(w.key),
+                      onResume: () => strategy.resume(w.key),
+                      onKill: () => _confirmKill(context, w),
+                    ),
+                  )
                       .toList(),
                 );
               },
             ),
             const SizedBox(height: 12),
             _sectionTitle("Recent activity"),
-            _ActivityFeed(strategy: strategy),
+            _ActivityFeed(logs: logs),
           ],
         ),
       ),
@@ -253,29 +268,11 @@ class HomeDashboard extends StatelessWidget {
   );
 }
 
-class _ActivityFeed extends StatefulWidget {
-  final StrategyService strategy;
-  const _ActivityFeed({required this.strategy});
-  @override
-  State<_ActivityFeed> createState() => _ActivityFeedState();
-}
+class _ActivityFeed extends StatelessWidget {
+  final List<Map<String, dynamic>> logs;
 
-class _ActivityFeedState extends State<_ActivityFeed> {
-  final List<StrategyEvent> _events = [];
-  @override
-  void initState() {
-    super.initState();
-    widget.strategy.events.listen((e) {
-      if (!mounted) return;
-      setState(() {
-        _events.insert(0, e);
-        if (_events.length > 30) _events.removeLast();
-      });
-    });
-  }
+  const _ActivityFeed({required this.logs});
 
-  String _time(DateTime t) =>
-      '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}:${t.second.toString().padLeft(2, '0')}';
   @override
   Widget build(BuildContext context) {
     return Container(
@@ -285,63 +282,47 @@ class _ActivityFeedState extends State<_ActivityFeed> {
         color: const Color(0xff162033),
         borderRadius: BorderRadius.circular(16),
       ),
-      child: _events.isEmpty
+      child: logs.isEmpty
           ? const Padding(
-              padding: EdgeInsets.symmetric(vertical: 16),
-              child: Text(
-                "Waiting for events…",
-                style: TextStyle(color: Colors.grey),
-              ),
-            )
-          : Column(
-              children: _events
-                  .map(
-                    (e) => Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 6),
-                      child: Row(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            _time(e.time),
-                            style: const TextStyle(
-                              color: Colors.white38,
-                              fontSize: 11,
-                            ),
-                          ),
-                          const SizedBox(width: 10),
-                          Container(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 6,
-                              vertical: 1,
-                            ),
-                            margin: const EdgeInsets.only(right: 8),
-                            decoration: BoxDecoration(
-                              color: Colors.blueAccent.withValues(alpha: 0.15),
-                              borderRadius: BorderRadius.circular(4),
-                            ),
-                            child: Text(
-                              e.symbol,
-                              style: const TextStyle(
-                                color: Colors.blueAccent,
-                                fontSize: 10,
-                              ),
-                            ),
-                          ),
-                          Expanded(
-                            child: Text(
-                              e.message,
-                              style: const TextStyle(
-                                color: Colors.white70,
-                                fontSize: 12,
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
+        padding: EdgeInsets.symmetric(vertical: 16),
+        child: Text(
+          "No system logs yet...",
+          style: TextStyle(color: Colors.white38),
+        ),
+      )
+          : ListView.builder(
+        shrinkWrap: true,
+        physics: const NeverScrollableScrollPhysics(), // Disables internal scroll so SingleChildScrollView handles it
+        itemCount: logs.length,
+        itemBuilder: (context, index) {
+          final log = logs[index];
+          return Padding(
+            padding: const EdgeInsets.only(bottom: 6),
+            child: RichText(
+              text: TextSpan(
+                style: const TextStyle(fontSize: 12, fontFamily: 'monospace'),
+                children: [
+                  TextSpan(
+                    text: "[${log['timestamp']}] ",
+                    style: const TextStyle(color: Colors.white38),
+                  ),
+                  TextSpan(
+                    text: "${log['symbol']} ",
+                    style: const TextStyle(
+                      color: Colors.blueAccent,
+                      fontWeight: FontWeight.bold,
                     ),
-                  )
-                  .toList(),
+                  ),
+                  TextSpan(
+                    text: "- ${log['message']}",
+                    style: const TextStyle(color: Colors.white70),
+                  ),
+                ],
+              ),
             ),
+          );
+        },
+      ),
     );
   }
 }

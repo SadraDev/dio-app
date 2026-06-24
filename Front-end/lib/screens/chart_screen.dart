@@ -1090,24 +1090,6 @@ class _ChartScreenState extends State<ChartScreen> {
             },
           ),
         ),
-
-        if (_ticketActive && !_panWhileTicketing)
-          Positioned(
-            top: 20, left: 20, right: 20,
-            child: Container(
-              padding: const EdgeInsets.all(8),
-              decoration: BoxDecoration(
-                color: const Color(0xff162033).withValues(alpha: 0.92),
-                borderRadius: BorderRadius.circular(10),
-                border: Border.all(color: Colors.blueAccent),
-              ),
-              child: Text(
-                "Dragging ${_dragTarget.name.toUpperCase()} — drag on chart to set price",
-                textAlign: TextAlign.center,
-                style: const TextStyle(color: Colors.white, fontSize: 12),
-              ),
-            ),
-          ),
       ],
     );
   }

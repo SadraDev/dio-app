@@ -7,7 +7,31 @@ import 'api_client.dart';
 /// ─────────────────────────────────────────────────────────────────────────
 /// REST surface for the strategies app (config / start / control / backtest).
 /// ─────────────────────────────────────────────────────────────────────────
+
+class StrategySnapshot {
+  final List<WorkerState> workers;
+  final List<Map<String, dynamic>> logs;
+
+  StrategySnapshot({required this.workers, required this.logs});
+}
+
 class StrategyApi {
+  static Future<StrategySnapshot> getSnapshot() async {
+    try {
+      final response = await ApiClient.get('/strategies/workers/');
+
+      final workers = (response.data['workers'] as List)
+          .map((w) => WorkerState.fromJson(w))
+          .toList();
+
+      final logs = List<Map<String, dynamic>>.from(response.data['logs'] ?? []);
+
+      return StrategySnapshot(workers: workers, logs: logs);
+    } catch (e) {
+      throw Exception('Failed to fetch snapshot: $e');
+    }
+  }
+
   static Future<Map<String, dynamic>> getConfig() async {
     final res = await ApiClient.get('/strategies/twohunters/config/');
     return Map<String, dynamic>.from(res['config'] ?? {});
@@ -23,12 +47,10 @@ class StrategyApi {
   static Future<WorkerState> startProcess(
     String symbol, {
     Map<String, dynamic>? config,
-    bool dryRun = true,
   }) async {
     final res = await ApiClient.post('/strategies/twohunters/start/', body: {
       'symbol': symbol,
-      'dry_run': dryRun,
-      if (config != null) 'config': config,
+      'config': ?config,
     });
     return WorkerState.fromJson(Map<String, dynamic>.from(res));
   }
@@ -57,7 +79,7 @@ class StrategyApi {
       'symbols': symbols,
       'start_date': startDate,
       'end_date': endDate,
-      if (config != null) 'config': config,
+      'config': ?config,
     });
     return BacktestRun.fromJson(Map<String, dynamic>.from(res));
   }
@@ -66,6 +88,25 @@ class StrategyApi {
     final res = await ApiClient.get('/strategies/backtests/$id/');
     return BacktestRun.fromJson(Map<String, dynamic>.from(res));
   }
+
+  static Future<WorkerState> updateWorkerConfig(String workerId, Map<String, dynamic> config) async {
+    try {
+      final response = await ApiClient.post(
+        '/strategies/workers/update_config/',
+        body: {
+          'id': workerId,
+          'config': config,
+        },
+      );
+
+      // Since it's already the bare object, just pass it directly to fromJson
+      return WorkerState.fromJson(response.data as Map<String, dynamic>);
+
+    } catch (e) {
+      throw Exception('Failed to update worker config: $e');
+    }
+  }
+
 }
 
 /// ─────────────────────────────────────────────────────────────────────────

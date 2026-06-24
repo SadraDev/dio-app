@@ -273,7 +273,6 @@ class _RunTab extends StatefulWidget {
 
 class _RunTabState extends State<_RunTab> {
   final _symbol = TextEditingController(text: 'EURUSD');
-  bool _dryRun = true;
   bool _busy = false;
   String? _msg;
 
@@ -287,38 +286,13 @@ class _RunTabState extends State<_RunTab> {
     final symbol = _symbol.text.trim().toUpperCase();
     if (symbol.isEmpty) return;
 
-    if (!_dryRun) {
-      final ok = await showDialog<bool>(
-        context: context,
-        builder: (ctx) => AlertDialog(
-          backgroundColor: const Color(0xff162033),
-          title: const Text('Start live (real orders)?', style: TextStyle(color: Colors.white)),
-          content: Text(
-            'Dry-run is OFF. The worker will place REAL orders on $symbol through MT5. Continue?',
-            style: const TextStyle(color: Colors.white70),
-          ),
-          actions: [
-            TextButton(onPressed: () => Navigator.pop(ctx, false),
-                child: const Text('Cancel', style: TextStyle(color: Colors.grey))),
-            ElevatedButton(
-                style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent),
-                onPressed: () => Navigator.pop(ctx, true),
-                child: const Text('Start live', style: TextStyle(color: Colors.white))),
-          ],
-        ),
-      );
-      if (ok != true) return;
-    }
+    setState(() { _busy = true; _msg = null; });
 
-    setState(() {
-      _busy = true;
-      _msg = null;
-    });
     try {
-      final state = await StrategyApi.startProcess(symbol,
-          config: widget.config?.toJson(), dryRun: _dryRun);
-      setState(() => _msg = 'Started ${state.strategy} on ${state.symbol}'
-          '${_dryRun ? ' (dry-run)' : ''}. See it on the Strategies / Home screen.');
+      // dryRun is hardcoded to false here to strip out dummy data
+      await StrategyApi.startProcess(symbol, config: widget.config?.toJson());
+
+      setState(() => _msg = 'Started live worker on $symbol.');
     } catch (e) {
       setState(() => _msg = 'Error: $e');
     } finally {
@@ -333,9 +307,6 @@ class _RunTabState extends State<_RunTab> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text('Start a TwoHunters worker for one symbol using the saved config.',
-              style: TextStyle(color: Colors.white70)),
-          const SizedBox(height: 16),
           TextField(
             controller: _symbol,
             textCapitalization: TextCapitalization.characters,
@@ -348,29 +319,19 @@ class _RunTabState extends State<_RunTab> {
               border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide.none),
             ),
           ),
-          const SizedBox(height: 8),
-          SwitchListTile(
-            value: _dryRun,
-            onChanged: (v) => setState(() => _dryRun = v),
-            activeThumbColor: Colors.green,
-            contentPadding: EdgeInsets.zero,
-            title: const Text('Dry-run (no real orders)', style: TextStyle(color: Colors.white)),
-            subtitle: const Text('Narrates the full lifecycle and tracks floating P/L without sending orders.',
-                style: TextStyle(color: Colors.grey, fontSize: 12)),
-          ),
-          const SizedBox(height: 12),
+          const SizedBox(height: 16),
           SizedBox(
             width: double.infinity,
             child: ElevatedButton.icon(
               style: ElevatedButton.styleFrom(
-                  backgroundColor: _dryRun ? Colors.green : Colors.redAccent,
+                  backgroundColor: Colors.redAccent, // Red to indicate it's live
                   padding: const EdgeInsets.symmetric(vertical: 14)),
               onPressed: _busy ? null : _start,
               icon: _busy
                   ? const SizedBox(height: 18, width: 18, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
                   : const Icon(Icons.play_arrow, color: Colors.white),
-              label: Text(_dryRun ? 'Start dry-run' : 'Start live',
-                  style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+              label: const Text('Start LIVE Worker',
+                  style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
             ),
           ),
           if (_msg != null) ...[
