@@ -44,7 +44,6 @@ INSTALLED_APPS = [
     'corsheaders',
 
     'accounts',
-    'trading',
     'strategies',
     'execution',
     'marketdata',

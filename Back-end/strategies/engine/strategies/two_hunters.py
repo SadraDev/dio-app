@@ -195,63 +195,89 @@ class TwoHunters:
 
     # --- backtest ------------------------------------------------------------
     def backtest(self, symbols: List[str], start_date: datetime, end_date: datetime) -> Dict[str, Any]:
-        """
-        Run a day-by-day backtest. Returns a JSON-able dict:
-            { "EURUSD": [signal_dict, ...], ..., "summary": {...} }
-        """
-        results: Dict[str, Any] = {sym: [] for sym in symbols}
-        all_signals: List[Signal] = []
-        days_processed = 0
-        bars_processed = 0
+            """
+            Run a day-by-day backtest. Returns a JSON-able dict:
+                { "EURUSD": [signal_dict, ...], ..., "equity_curve": [...], "summary": {...} }
+            """
+            results: Dict[str, Any] = {sym: [] for sym in symbols}
+            all_signals = []
+            days_processed = 0
+            bars_processed = 0
 
-        current_date = start_date
-        while current_date < end_date:
-            if current_date.weekday() >= 5:  # skip weekends
-                current_date += timedelta(days=1)
-                continue
+            # Metrics Tracking
+            peak = self.budget.initial_balance
+            max_drawdown_pct = 0.0
+            equity_curve = [{"time": start_date.isoformat(), "equity": peak}]
 
-            day_start = datetime.combine(current_date.date(), self.mbox_time[0])
-            day_end = datetime.combine(current_date.date(), self.session_time[1])
-
-            for symbol in symbols:
-                daily_bars = self.fetcher.fetch_bars_from_mt5(day_start, day_end, symbol)
-                bars_processed += len(daily_bars)
-                self.budget.calculate_pip_size(symbol)
-                self.budget.calculate_lot_size(symbol)
-                if not daily_bars:
+            current_date = start_date
+            while current_date < end_date:
+                if current_date.weekday() >= 5:  # skip weekends
+                    current_date += timedelta(days=1)
                     continue
 
-                self.symbol = symbol
-                self.add_bars(daily_bars)
-                signal = self.attempt_signal(current_date)
-                if signal:
-                    signal.evaluate_signal(budget=self.budget, fetcher=self.fetcher)
-                    if signal.is_completed:
-                        self.budget.apply_signal_gain(signal)
-                        results[symbol].append(signal.to_dict())
-                        all_signals.append(signal)
+                day_start = datetime.combine(current_date.date(), self.mbox_time[0])
+                day_end = datetime.combine(current_date.date(), self.session_time[1])
 
-            days_processed += 1
-            current_date += timedelta(days=1)
+                for symbol in symbols:
+                    daily_bars = self.fetcher.fetch_bars_from_mt5(day_start, day_end, symbol)
+                    bars_processed += len(daily_bars)
+                    self.budget.calculate_pip_size(symbol)
+                    self.budget.calculate_lot_size(symbol)
+                    if not daily_bars:
+                        continue
 
-        wins = sum(1 for s in all_signals if s.outcome and s.outcome.value == "win")
-        losses = sum(1 for s in all_signals if s.outcome and s.outcome.value == "loss")
-        total = len(all_signals)
-        gross = sum(s.gain for s in all_signals)
+                    self.symbol = symbol
+                    self.add_bars(daily_bars)
+                    signal = self.attempt_signal(current_date)
+                    if signal:
+                        signal.evaluate_signal(budget=self.budget, fetcher=self.fetcher)
+                        if signal.is_completed:
+                            self.budget.apply_signal_gain(signal)
+                            results[symbol].append(signal.to_dict())
+                            all_signals.append(signal)
 
-        results["summary"] = {
-            "symbols": symbols,
-            "start_date": start_date.isoformat(),
-            "end_date": end_date.isoformat(),
-            "initial_balance": self.budget.initial_balance,
-            "final_balance": self.budget.current_balance,
-            "net_gain": self.budget.current_balance - self.budget.initial_balance,
-            "total_signals": total,
-            "wins": wins,
-            "losses": losses,
-            "win_rate": (wins / total * 100) if total else 0.0,
-            "gross_gain": gross,
-            "days_processed": days_processed,
-            "bars_processed": bars_processed,
-        }
-        return results
+                            # Update equity curve and drawdown
+                            current_balance = self.budget.current_balance
+                            timestamp_str = signal.timestamp.isoformat() if hasattr(signal.timestamp, 'isoformat') else str(signal.timestamp)
+                            
+                            equity_curve.append({
+                                "time": timestamp_str,
+                                "equity": current_balance
+                            })
+                            
+                            if current_balance > peak:
+                                peak = current_balance
+                            else:
+                                dd_pct = ((peak - current_balance) / peak) * 100
+                                if dd_pct > max_drawdown_pct:
+                                    max_drawdown_pct = dd_pct
+
+                days_processed += 1
+                current_date += timedelta(days=1)
+
+            # Ensure curve is chronological if multiple symbols fired on the same day
+            equity_curve.sort(key=lambda x: x["time"])
+
+            wins = sum(1 for s in all_signals if s.outcome and s.outcome.value == "win")
+            losses = sum(1 for s in all_signals if s.outcome and s.outcome.value == "loss")
+            total = len(all_signals)
+            gross = sum(s.gain for s in all_signals)
+
+            results["equity_curve"] = equity_curve
+            results["summary"] = {
+                "symbols": symbols,
+                "start_date": start_date.isoformat(),
+                "end_date": end_date.isoformat(),
+                "initial_balance": self.budget.initial_balance,
+                "final_balance": self.budget.current_balance,
+                "net_gain": self.budget.current_balance - self.budget.initial_balance,
+                "total_signals": total,
+                "wins": wins,
+                "losses": losses,
+                "win_rate": (wins / total * 100) if total else 0.0,
+                "gross_gain": gross,
+                "days_processed": days_processed,
+                "bars_processed": bars_processed,
+                "total_drawdown": max_drawdown_pct,
+            }
+            return results

@@ -122,6 +122,33 @@ class WorkerStateView(APIView):
 
 
 # ── Backtests ────────────────────────────────────────────────────────────────
+import threading
+
+def run_backtest_async(run_id):
+    from .models import BacktestRun
+    from .engine.strategies.two_hunters import TwoHunters
+    import traceback
+    
+    try:
+        run = BacktestRun.objects.get(id=run_id)
+        engine = TwoHunters(config=run.config)
+        
+        # Convert Dates to Datetimes for the engine
+        sd = datetime.combine(run.start_date, datetime.min.time())
+        ed = datetime.combine(run.end_date, datetime.min.time())
+        
+        results = engine.backtest(symbols=run.symbols, start_date=sd, end_date=ed)
+        
+        run.results = results
+        run.status = "completed"
+        run.save(update_fields=["results", "status"])
+    except Exception:
+        run = BacktestRun.objects.get(id=run_id)
+        run.error = traceback.format_exc()
+        run.status = "failed"
+        run.save(update_fields=["error", "status"])
+
+
 class BacktestView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -129,31 +156,24 @@ class BacktestView(APIView):
         ser = BacktestRequestSerializer(data=request.data)
         if not ser.is_valid():
             return Response(ser.errors, status=400)
+        
         data = ser.validated_data
         config = data.get("config") or StrategyConfig.get_or_create_default("TwoHunters").config
 
         run = BacktestRun.objects.create(
-            strategy_name="TwoHunters", symbols=data["symbols"],
-            start_date=data["start_date"], end_date=data["end_date"],
-            config=config, status="running",
+            strategy_name="TwoHunters", 
+            symbols=data["symbols"],
+            start_date=data["start_date"], 
+            end_date=data["end_date"],
+            config=config, 
+            status="running",
         )
 
-        try:
-            engine = TwoHunters(config=run.config)
-            results = engine.backtest(
-                symbols=run.symbols,
-                start_date=datetime.combine(run.start_date, datetime.min.time()),
-                end_date=datetime.combine(run.end_date, datetime.min.time()),
-            )
-            run.results = results
-            run.status = "completed"
-            run.save(update_fields=["results", "status"])
-        except Exception:
-            import traceback
-            run.error = traceback.format_exc()
-            run.status = "failed"
-            run.save(update_fields=["error", "status"])
+        # ── Start the backtest in the background ──
+        thread = threading.Thread(target=run_backtest_async, args=(run.id,))
+        thread.start()
 
+        # Immediately return the 'running' status so the frontend can start polling
         return Response(BacktestRunSerializer(run).data, status=200)
 
     def get(self, request):
